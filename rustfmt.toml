@@ -1,0 +1,8 @@
+imports_granularity = "Module"
+use_try_shorthand = true
+fn_single_line = true
+comment_width = 70
+wrap_comments = true
+group_imports = "One"
+reorder_impl_items = true
+format_strings = true
