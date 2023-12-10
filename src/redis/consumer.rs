@@ -17,7 +17,7 @@ pub struct RedisConsumer {
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum RedisStreamConsumerError {
+pub enum RedisConsumerError {
     #[error("failed to connect to redis: {source}")]
     Connection {
         #[source]
@@ -76,7 +76,7 @@ impl RedisConsumer {
     /// This only needs to be called once, but it is safe to call it
     /// multiple times.
     #[tracing::instrument]
-    pub async fn create(&mut self) -> Result<(), RedisStreamConsumerError> {
+    pub async fn create(&mut self) -> Result<(), RedisConsumerError> {
         let mut connection = self.connection().await?;
         // first, checks if the stream exists.
         // `EXISTS {stream-key}`
@@ -84,13 +84,13 @@ impl RedisConsumer {
             .exists::<_, i64>(&*self.stream)
             .await
             .map(|v| v > 0)
-            .map_err(|source| RedisStreamConsumerError::CreateStreamFailure { source })?;
+            .map_err(|source| RedisConsumerError::CreateStreamFailure { source })?;
 
         let has_group = if exists {
             let reply: StreamInfoGroupsReply = connection
                 .xinfo_groups(&*self.stream)
                 .await
-                .map_err(|source| RedisStreamConsumerError::CreateStreamFailure { source })?;
+                .map_err(|source| RedisConsumerError::CreateStreamFailure { source })?;
 
             reply.groups.iter().any(|group| group.name == *self.group)
         } else {
@@ -111,17 +111,17 @@ impl RedisConsumer {
                         Err(e)
                     }
                 })
-                .map_err(|source| RedisStreamConsumerError::CreateStreamFailure { source })?;
+                .map_err(|source| RedisConsumerError::CreateStreamFailure { source })?;
         }
 
         Ok(())
     }
 
-    async fn connection(&mut self) -> Result<redis::aio::Connection, RedisStreamConsumerError> {
+    async fn connection(&mut self) -> Result<redis::aio::Connection, RedisConsumerError> {
         self.client
             .get_async_connection()
             .await
-            .map_err(|source| RedisStreamConsumerError::Connection { source })
+            .map_err(|source| RedisConsumerError::Connection { source })
     }
 }
 
@@ -129,7 +129,7 @@ impl RedisConsumer {
 impl<T: serde::de::DeserializeOwned + Send + Unpin + 'static> ConsumerProvider<T>
     for RedisConsumer
 {
-    type Error = RedisStreamConsumerError;
+    type Error = RedisConsumerError;
     type Stream = RedisStream<T>;
 
     async fn stream(&mut self, consumer: &str) -> Result<Self::Stream, Self::Error> {

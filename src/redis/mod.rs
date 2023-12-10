@@ -92,7 +92,7 @@ use crate::MessageId;
 mod consumer;
 
 #[cfg(feature = "consumer")]
-pub use self::consumer::{RedisConsumer, RedisStreamConsumerError};
+pub use self::consumer::{RedisConsumer, RedisConsumerError, RedisStream, RedisStreamError};
 
 mod data;
 
