@@ -36,10 +36,9 @@ futures = { version = "0.3.29", default-features = false, features = [
     "async-await",
 ] }
 pin-project-lite = "0.2.13"
-redis = { version = "0.23.3", optional = true, features = [
-    "aio",
-    "tokio-comp",
-] }
+redis = { version = "0.24", optional = true, features = ["aio", "tokio-comp"] }
+bb8 = { version = "^0.8", optional = true }
+bb8-redis = { version = "0.14.0", optional = true }
 serde = { version = "1.0.193", features = ["derive"] }
 serde_json = "1.0.108"
 thiserror = "1.0.50"
@@ -53,5 +52,6 @@ tower = { version = "0.4.13", features = ["make", "util"] }
 
 [features]
 default = ["redis", "consumer", "producer"]
+redis = ["bb8", "bb8-redis", "dep:redis"]
 consumer = []
 producer = []

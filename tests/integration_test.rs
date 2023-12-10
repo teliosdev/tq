@@ -1,3 +1,4 @@
+use bb8_redis::RedisConnectionManager;
 use rand::Rng as _;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -6,7 +7,7 @@ use std::time::Duration;
 use tower::service_fn;
 use tq::{Consumer, Message, ProducerProvider as _};
 
-async fn connect(key: &str) -> redis::Client {
+async fn connect(key: &str) -> (redis::Client, bb8::Pool<RedisConnectionManager>) {
     let client = redis::Client::open("redis://127.0.0.1/0").expect("redis client");
     // ensure that we can actually connect to redis.  drop it immediately
     // after to disconnect.
@@ -32,7 +33,16 @@ async fn connect(key: &str) -> redis::Client {
     // otherwise the lag will always be 0!
     consumer.create().await.expect("provider create");
 
-    client
+    (
+        client,
+        bb8::Pool::builder()
+            .build(
+                bb8_redis::RedisConnectionManager::new("redis://127.0.0.1/0")
+                    .expect("redis connection manager"),
+            )
+            .await
+            .expect("redis pool"),
+    )
 }
 
 fn queue_key() -> String {
@@ -48,8 +58,8 @@ fn queue_key() -> String {
 #[tokio::test]
 async fn test_standard() {
     let key = queue_key();
-    let client = connect(&key).await;
-    let mut producer = tq::redis::RedisProducer::new(client.clone(), 128);
+    let (client, pool) = connect(&key).await;
+    let mut producer = tq::redis::RedisProducer::new(pool.clone(), 128);
 
     for i in 0..64 {
         producer.push(&key, &Task { count: i }).await.expect("push");
@@ -98,8 +108,8 @@ async fn test_standard() {
 #[tokio::test]
 async fn test_overflow() {
     let key = queue_key();
-    let client = connect(&key).await;
-    let mut provider = tq::redis::RedisProducer::new(client.clone(), 64);
+    let (_, pool) = connect(&key).await;
+    let mut provider = tq::redis::RedisProducer::new(pool.clone(), 64);
 
     for i in 0..64 {
         provider.push(&key, &Task { count: i }).await.expect("push");

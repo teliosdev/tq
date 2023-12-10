@@ -4,7 +4,7 @@ use redis::AsyncCommands;
 
 #[derive(Debug, Clone)]
 pub struct RedisProducer {
-    client: redis::Client,
+    client: bb8::Pool<bb8_redis::RedisConnectionManager>,
     max_stream_length: u32,
 }
 
@@ -14,7 +14,7 @@ pub enum RedisProducerError {
     #[error("failed to connect to redis: {source}")]
     Connection {
         #[source]
-        source: redis::RedisError,
+        source: bb8::RunError<redis::RedisError>,
     },
     #[error("failed to load the current lag from the redis server: {source}")]
     GetCurrentLag {
@@ -48,7 +48,10 @@ impl RedisProducer {
     /// streams and how they're used here, please see the
     /// [modul-level documentation](crate::redis).
     #[must_use = "a producer does nothing unless used"]
-    pub fn new(client: redis::Client, max_stream_length: u32) -> Self {
+    pub fn new(
+        client: bb8::Pool<bb8_redis::RedisConnectionManager>,
+        max_stream_length: u32,
+    ) -> Self {
         Self {
             client,
             max_stream_length,
@@ -89,9 +92,12 @@ impl RedisProducer {
             .await
     }
 
-    async fn connection(&self) -> Result<redis::aio::Connection, RedisProducerError> {
+    async fn connection(
+        &self,
+    ) -> Result<bb8::PooledConnection<'_, bb8_redis::RedisConnectionManager>, RedisProducerError>
+    {
         self.client
-            .get_async_connection()
+            .get()
             .await
             .map_err(|source| RedisProducerError::Connection { source })
     }
@@ -157,11 +163,11 @@ impl RedisProducer {
 
     async fn push_unchecked_into(
         &self,
-        connection: &mut redis::aio::Connection,
+        connection: &mut bb8::PooledConnection<'_, bb8_redis::RedisConnectionManager>,
         serialized: String,
         key: &str,
     ) -> Result<(), RedisProducerError> {
-        connection
+        (connection)
             .xadd_maxlen(
                 key,
                 redis::streams::StreamMaxlen::Approx(self.max_stream_length as usize),
