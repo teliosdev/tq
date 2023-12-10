@@ -87,7 +87,7 @@ async fn process_stream<T, C, S>(
     mut service: S,
     mut rx: watch::Receiver<bool>,
     config: Config,
-) -> Result<(), Box<dyn std::error::Error>>
+) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>>
 where
     T: serde::de::DeserializeOwned,
     C: ConsumerStream<T>,
@@ -119,7 +119,7 @@ async fn process_message<T, C, S>(
     service: &mut S,
     config: &Config,
     message: Message<T>,
-) -> Result<(), Box<dyn std::error::Error>>
+) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>>
 where
     C: ConsumerStream<T>,
     T: serde::de::DeserializeOwned,
@@ -171,7 +171,7 @@ impl Default for Config {
     }
 }
 
-type TaskResult = Result<(), Box<dyn std::error::Error>>;
+type TaskResult = Result<(), Box<dyn std::error::Error + Send + Sync + 'static>>;
 
 #[must_use]
 pub struct Spawn<'shutdown> {
@@ -201,7 +201,7 @@ impl<'shutdown> Spawn<'shutdown> {
         }
     }
 
-    pub async fn wait(self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn wait(self) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
         let tasks = futures::stream::FuturesUnordered::from_iter(self.tasks).try_collect::<()>();
         let stop = self.stop;
         let stop = async move {
