@@ -650,6 +650,9 @@ impl<T: serde::de::DeserializeOwned + Send + Unpin + 'static> ConsumerStream<T> 
                 source,
             })?;
 
+        this.processing_set.remove(id);
+        this.task_buffer.remove(id);
+
         Ok(())
     }
 
