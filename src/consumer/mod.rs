@@ -104,11 +104,14 @@ where
             }
             message = stream.as_mut().next(config.poll_timeout) => { message? }
         };
-        let Some(message) = message else {
-            break;
-        };
 
-        process_message(stream.as_mut(), &mut service, &config, message).await?;
+        match message {
+            Some(message) => {
+                process_message(stream.as_mut(), &mut service, &config, message).await?
+            }
+            None if config.poll_once => break,
+            None => {}
+        }
     }
 
     Ok(())
@@ -160,6 +163,7 @@ where
 struct Config {
     keep_alive_interval: std::time::Duration,
     poll_timeout: std::time::Duration,
+    poll_once: bool,
 }
 
 impl Default for Config {
@@ -167,6 +171,7 @@ impl Default for Config {
         Self {
             keep_alive_interval: std::time::Duration::from_secs(30),
             poll_timeout: std::time::Duration::from_secs(30),
+            poll_once: false,
         }
     }
 }
