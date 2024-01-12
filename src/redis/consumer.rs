@@ -23,12 +23,16 @@ pub enum RedisConsumerError {
         #[source]
         source: redis::RedisError,
     },
+    #[error("invalid consumer name: {name}")]
+    InvalidConsumerName { name: String },
     #[error("failed to create the stream group: {source}")]
     CreateStreamFailure {
         #[source]
         source: redis::RedisError,
     },
 }
+
+const NACK_CONSUMER: &str = "$$nack";
 
 impl RedisConsumer {
     /// Creates a new redis stream consumer.
@@ -133,6 +137,11 @@ impl<T: serde::de::DeserializeOwned + Send + Unpin + 'static> ConsumerProvider<T
     type Stream = RedisStream<T>;
 
     async fn stream(&mut self, consumer: &str) -> Result<Self::Stream, Self::Error> {
+        if consumer == NACK_CONSUMER {
+            return Err(RedisConsumerError::InvalidConsumerName {
+                name: consumer.to_owned(),
+            });
+        }
         let connection = self.connection().await?;
         Ok(RedisStream {
             stream: Arc::clone(&self.stream),
@@ -256,6 +265,13 @@ pub enum RedisStreamError {
         #[source]
         source: redis::RedisError,
     },
+    #[error("failed to load any nacked messages under {group} for {consumer}: {source}")]
+    PendingNack {
+        consumer: Box<str>,
+        group: Arc<str>,
+        #[source]
+        source: redis::RedisError,
+    },
     #[error("failed to claim entries for {consumer} in {group}: {source}")]
     Claim {
         consumer: Box<str>,
@@ -297,12 +313,21 @@ impl<T: serde::de::DeserializeOwned + Unpin> RedisStream<T> {
             return Ok(Some(entry));
         }
 
+        // we need to store this in a local because
+        // `self.push(self.poll().await?)` borrows `self` mutably
+        // twice.
+
         let got = self.poll_pending().await?;
         if let Some(v) = self.push(got) {
             return Ok(Some(v));
         }
 
         let got = self.poll_steal().await?;
+        if let Some(v) = self.push(got) {
+            return Ok(Some(v));
+        }
+
+        let got = self.poll_nack().await?;
         if let Some(v) = self.push(got) {
             return Ok(Some(v));
         }
@@ -328,10 +353,10 @@ impl<T: serde::de::DeserializeOwned + Unpin> RedisStream<T> {
         // We want to re-claim these, if we, for some reason, rebooted.
         //
         // This calls `XPENDING {stream} {group} - + 10 {consumer}`, which
-        // returns the top 10 items in _this consumer's_ pending entries list.
+        // returns the top 1 items in _this consumer's_ pending entries list.
         // (The `-` and `+` represent the smallest and largest ID possible,
         // respectively.)
-        let result: redis::streams::StreamPendingCountReply = self
+        let mut result: redis::streams::StreamPendingCountReply = self
             .connection
             .xpending_consumer_count(&*self.stream, &*self.group, "-", "+", 10, &*self.consumer)
             .await
@@ -341,52 +366,25 @@ impl<T: serde::de::DeserializeOwned + Unpin> RedisStream<T> {
                 source,
             })?;
 
-        let ids = result
-            .ids
-            .iter()
-            .map(|id| MessageId::new(id.id.clone()))
-            .collect::<Vec<_>>();
         // Only take in the IDs that we haven't already claimed or are already
         // processing.
-        let ids = ids
-            .iter()
-            .filter(|id| !self.processing_set.contains(*id) && !self.task_buffer.contains_key(*id))
+        result.ids = result
+            .ids
+            .into_iter()
+            .filter(|id| {
+                let message_id = MessageId::new(&id.id);
+                !self.processing_set.contains(&message_id)
+                    && !self.task_buffer.contains_key(&message_id)
+            })
             .collect::<Vec<_>>();
-
-        if ids.is_empty() {
-            return Ok(vec![]);
-        }
-
-        let min_idle_time = result
+        let min_idle = result
             .ids
             .iter()
-            .map(|id| id.last_delivered_ms)
+            .map(|item| item.last_delivered_ms)
             .min()
             .unwrap_or(0);
 
-        // Re-claim our items.  This, as a side effect, resets the idle time
-        // of the messages, but also increments the retry counter
-        // (since JUSTID was not specified.)  We'll then return all of the
-        // claimed items.
-        let options = redis::streams::StreamClaimOptions::default().idle(0);
-        let claims: redis::streams::StreamClaimReply = self
-            .connection
-            .xclaim_options(
-                &*self.stream,
-                &*self.group,
-                &*self.consumer,
-                min_idle_time,
-                &ids[..],
-                options,
-            )
-            .await
-            .map_err(|source| RedisStreamError::Claim {
-                group: Arc::clone(&self.group),
-                consumer: self.consumer.clone(),
-                source,
-            })?;
-
-        Ok(claims.ids.into_iter().map(map_stream_id).collect())
+        self.claim_from(result, min_idle).await
     }
 
     /// Finds expired/idle tasks for this consumer.
@@ -407,7 +405,7 @@ impl<T: serde::de::DeserializeOwned + Unpin> RedisStream<T> {
         //
         // Retrieves any one pending message from the group that exceed the
         // idle timeout time.
-        let mut pending: redis::streams::StreamPendingCountReply = redis::cmd("XPENDING")
+        let pending: redis::streams::StreamPendingCountReply = redis::cmd("XPENDING")
             .arg(&*self.stream)
             .arg(&*self.group)
             .arg("IDLE")
@@ -423,29 +421,56 @@ impl<T: serde::de::DeserializeOwned + Unpin> RedisStream<T> {
                 source,
             })?;
 
-        // If we didn't get one entry, we can just return early.
-        let Some(item) = pending.ids.pop() else {
-            return Ok(vec![]);
-        };
+        self.claim_from(pending, idle_timeout).await
+    }
 
-        assert!(
-            pending.ids.is_empty(),
-            "more than one pending entry - this should not happen, since we requested at most one \
-             item!"
-        );
+    /// Finds NACK'd tasks for this consumer.
+    ///
+    /// NACK'd messages are sent to a special consumer's PEL -
+    /// `$$nack`. There will never be a consumer named `$$nack`
+    /// (hopefully), so those messages are never processed.
+    /// Instead, we can claim them, and re-process them, without
+    /// having to wait for the idle timeout that `poll_steal`
+    /// would require (though if the message is left in `$$nack`'s
+    /// PEL for too long, `poll_steal` will steal it again).
+    async fn poll_nack(&mut self) -> Result<Vec<StreamEntry>, RedisStreamError> {
+        let pending: redis::streams::StreamPendingCountReply = self
+            .connection
+            .xpending_consumer_count(&*self.stream, &*self.group, "-", "+", 1, NACK_CONSUMER)
+            .await
+            .map_err(|source| RedisStreamError::PendingNack {
+                group: Arc::clone(&self.group),
+                consumer: self.consumer.clone(),
+                source,
+            })?;
+
+        self.claim_from(pending, 0).await
+    }
+
+    #[tracing::instrument]
+    async fn claim_from(
+        &mut self,
+        pending: redis::streams::StreamPendingCountReply,
+        idle: usize,
+    ) -> Result<Vec<StreamEntry>, RedisStreamError> {
+        if pending.ids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let ids = pending
+            .ids
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>();
 
         // Now, we're using `XCLAIM` for its intended purpose - to claim an
         // item! Here, we're just going to try to claim the one item we
         // took earlier.
-        let mut result = self
+        //
+        // XCLAIM stream group consumer min-idle-time ID [ID ...]
+        let claims: redis::streams::StreamClaimReply = self
             .connection
-            .xclaim::<_, _, _, _, _, redis::streams::StreamClaimReply>(
-                &*self.stream,
-                &*self.group,
-                &*self.consumer,
-                idle_timeout,
-                &[&item.id],
-            )
+            .xclaim(&*self.stream, &*self.group, &*self.consumer, idle, &ids)
             .await
             .map_err(|source| RedisStreamError::Claim {
                 group: Arc::clone(&self.group),
@@ -454,19 +479,23 @@ impl<T: serde::de::DeserializeOwned + Unpin> RedisStream<T> {
             })?;
 
         // Failed to claim - return immediately.
-        let Some(claim) = result.ids.pop() else {
+        if claims.ids.is_empty() {
             return Ok(vec![]);
         };
 
-        assert!(
-            result.ids.is_empty(),
-            "more than one claimed entry - this should not happen, since we requested at most one \
-             item!"
-        );
-
-        Ok(vec![
-            map_stream_id(claim).with_retries(item.times_delivered as u64)
-        ])
+        Ok(claims
+            .ids
+            .into_iter()
+            .map(map_stream_id)
+            .map(|entry| {
+                let retries = pending
+                    .ids
+                    .iter()
+                    .find(|item| item.id == entry.id.as_ref())
+                    .map_or(u64::MAX, |item| item.times_delivered as u64);
+                entry.with_retries(retries)
+            })
+            .collect())
     }
 
     /// The main polling function.
@@ -611,33 +640,14 @@ impl<T: serde::de::DeserializeOwned + Send + Unpin + 'static> ConsumerStream<T> 
             "task does not belong to this consumer"
         );
 
-        // this is an abuse of the `XCLAIM` command.  According to the Redis
-        // documentation, some of these options are "mainly for internal use"
-        // and "are unlikely to be useful to normal users."
-        //
-        // However, this is actually really useful; we select the message
-        // passed in to be NACK'd by setting the `min-idle-time` filter to 0
-        // (this option only selects an entry if it's been idle for at
-        // least this number of milliseconds), and passing in the
-        // `id`, and then _setting_ the idle time with the `IDLE`
-        // option to `idle_timeout+1`.  This means that the next time a
-        // consumer polls for a task, they will see that the task has
-        // been idle for that amount of time, and will steal it in
-        // `poll_steal`.  This re-delivery also happens to increment the
-        // retry counter.
-        //
-        // In essence, this combines into a `NACK`, which is incredibly
-        // useful.
-        let options = redis::streams::StreamClaimOptions::default()
-            .idle(this.idle_timeout.as_millis() as usize + 1)
-            .with_justid();
+        let options = redis::streams::StreamClaimOptions::default().with_justid();
 
-        let _: redis::Value = this
+        let claims: Vec<String> = this
             .connection
             .xclaim_options(
                 &*this.stream,
                 &*this.group,
-                &*this.consumer,
+                NACK_CONSUMER,
                 0,
                 &[id.as_ref()],
                 options,
@@ -649,6 +659,18 @@ impl<T: serde::de::DeserializeOwned + Send + Unpin + 'static> ConsumerStream<T> 
                 id: id.to_owned(),
                 source,
             })?;
+
+        if claims.is_empty() {
+            return Err(RedisStreamError::Nack {
+                group: Arc::clone(&this.group),
+                consumer: this.consumer.clone(),
+                id: id.to_owned(),
+                source: redis::RedisError::from((
+                    redis::ErrorKind::ClientError,
+                    "failed to nack message; the xclaim failed, so the message was not in the PEL?",
+                )),
+            });
+        }
 
         this.processing_set.remove(id);
         this.task_buffer.remove(id);

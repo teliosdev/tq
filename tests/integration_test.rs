@@ -125,6 +125,59 @@ async fn test_overflow() {
         .expect_err("should fail from overflow");
 }
 
+#[tokio::test]
+async fn test_nack() {
+    let key = queue_key();
+    let (client, pool) = connect(&key).await;
+    let mut producer = tq::redis::RedisProducer::new(pool.clone(), 128);
+
+    for i in 0..64 {
+        producer.push(&key, &Task { count: i }).await.expect("push");
+    }
+
+    let mut consumer =
+        tq::redis::RedisConsumer::new(client, key.clone(), "a".to_string(), Duration::from_secs(2));
+
+    consumer.create().await.expect("provider create");
+
+    let (tx, mut rx) = tokio::sync::broadcast::channel(1);
+    let mkservice = AtomicBool::new(false);
+
+    let service = service_fn(|()| {
+        let mkservice = &mkservice;
+        let tx = tx.clone();
+        async move {
+            assert!(
+                !mkservice.fetch_or(true, Ordering::SeqCst),
+                "mkservice created another service?"
+            );
+            Ok::<_, core::convert::Infallible>(FailCounterService::new(
+                Arc::new(AtomicU64::new(0)),
+                tx.clone(),
+            ))
+        }
+    });
+
+    let consumer = Consumer::build::<Task, _>(consumer)
+        .with_service(service)
+        .with_keep_alive_interval(Duration::from_secs(1))
+        .with_poll_timeout(Duration::from_secs(1))
+        .build();
+
+    let fut = async move { while !rx.recv().await.expect("recv") {} };
+
+    consumer
+        .run("main", 1)
+        .await
+        .expect("run")
+        .with_graceful_shutdown(fut)
+        .wait()
+        .await
+        .expect("failed to process tasks");
+
+    assert_eq!(63, producer.current_lag(&key).await.expect("current-lag"));
+}
+
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 struct Task {
     count: u64,
@@ -174,6 +227,52 @@ impl tower::Service<Message<Task>> for CounterService {
             }
             assert!(old < 64, "count exceeded 64");
             Ok(())
+        })
+    }
+}
+
+struct FailCounterService {
+    count: Arc<AtomicU64>,
+    tx: tokio::sync::broadcast::Sender<bool>,
+}
+
+impl FailCounterService {
+    fn new(count: Arc<AtomicU64>, tx: tokio::sync::broadcast::Sender<bool>) -> Self {
+        Self { count, tx }
+    }
+}
+
+impl tower::Service<Message<Task>> for FailCounterService {
+    type Error = ();
+    type Future = Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Self::Response, Self::Error>>
+                + Send
+                + Sync
+                + 'static,
+        >,
+    >;
+    type Response = ();
+
+    fn poll_ready(
+        &mut self,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, message: Message<Task>) -> Self::Future {
+        let count = self.count.clone();
+        let tx = self.tx.clone();
+        Box::pin(async move {
+            let old = count.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(message.retries, old);
+            assert_eq!(message.data.count, 0);
+            if old == 63 {
+                tx.send(true).expect("send");
+            }
+            assert!(old < 64, "count exceeded 64");
+            Err(())
         })
     }
 }

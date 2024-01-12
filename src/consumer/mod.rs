@@ -107,7 +107,7 @@ where
 
         match message {
             Some(message) => {
-                process_message(stream.as_mut(), &mut service, &config, message).await?
+                process_message(stream.as_mut(), &mut service, &config, message).await?;
             }
             None if config.poll_once => break,
             None => {}
