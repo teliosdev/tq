@@ -124,7 +124,7 @@ impl RedisProducer {
     /// are all meant as approximations, anyway, and not guarantees.
     async fn current_lag_from(
         &self,
-        conn: &mut redis::aio::Connection,
+        conn: &mut redis::aio::MultiplexedConnection,
         key: &str,
     ) -> Result<u64, RedisProducerError> {
         let stream_length: u64 = redis::cmd("XLEN")

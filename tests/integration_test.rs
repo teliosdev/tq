@@ -12,7 +12,7 @@ async fn connect(key: &str) -> (redis::Client, bb8::Pool<RedisConnectionManager>
     // ensure that we can actually connect to redis.  drop it immediately
     // after to disconnect.
     let mut conn = client
-        .get_async_connection()
+        .get_multiplexed_async_connection()
         .await
         .expect("redis connection");
 

@@ -121,9 +121,11 @@ impl RedisConsumer {
         Ok(())
     }
 
-    async fn connection(&mut self) -> Result<redis::aio::Connection, RedisConsumerError> {
+    async fn connection(
+        &mut self,
+    ) -> Result<redis::aio::MultiplexedConnection, RedisConsumerError> {
         self.client
-            .get_async_connection()
+            .get_multiplexed_async_connection()
             .await
             .map_err(|source| RedisConsumerError::Connection { source })
     }
@@ -187,7 +189,7 @@ pub struct RedisStream<T: Unpin> {
     /// implementation.  However, because of this, we need to borrow
     /// `self` as mutable whenever connecting to redis, which is
     /// fine.
-    connection: redis::aio::Connection,
+    connection: redis::aio::MultiplexedConnection,
 
     // Internal state.
     //
