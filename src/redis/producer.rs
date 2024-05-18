@@ -24,7 +24,7 @@ pub enum RedisProducerError {
     #[error("the current lag of the stream exceeds the limit: {source}")]
     LagExceedsLimit {
         #[source]
-        source: eyre::Report,
+        source: anyhow::Error,
     },
     #[error("failed to serialize the data: {source}")]
     SerializationFailure {
@@ -195,7 +195,7 @@ impl ProducerProvider for RedisProducer {
 
         if current_lag >= u64::from(self.max_stream_length) {
             return Err(RedisProducerError::LagExceedsLimit {
-                source: eyre::eyre!(
+                source: anyhow::format_err!(
                     "lag of {current_lag} exceeds the limit of {}",
                     self.max_stream_length
                 ),

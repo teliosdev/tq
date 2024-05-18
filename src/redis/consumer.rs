@@ -204,7 +204,7 @@ pub struct RedisStream<T: Unpin> {
     /// tasks we have received and claimed from redis, but have
     /// not begun processing; as such, it contains all of the task
     /// information.  The key is the stream ID; we can place this
-    /// in a BTreeMap because the keys are ordered by default,
+    /// in a `BTreeMap` because the keys are ordered by default,
     /// in the order they were received.  (A design decision by redis
     /// streams.)
     task_buffer: BTreeMap<MessageId, StreamEntry>,

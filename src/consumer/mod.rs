@@ -47,7 +47,7 @@ where
         mut self,
         consumer: &str,
         spawn: usize,
-    ) -> Result<Spawn<'static>, eyre::Report> {
+    ) -> Result<Spawn<'static>, anyhow::Error> {
         let (tx, rx) = watch::channel(false);
 
         let mut spawns = Spawn {

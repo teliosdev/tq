@@ -1,19 +1,19 @@
 [package]
 name = "tq"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 resolver = "2"
 
 [lints.rust]
 missing_debug_implementations = "warn"
-rust_2018_idioms = "warn"
-rust_2021_compatibility = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+rust_2021_compatibility = { level = "warn", priority = -1 }
 unsafe_code = "forbid"
 
 [lints.clippy]
-pedantic = "warn"
-all = "warn"
+pedantic = { level = "warn", priority = -1 }
+all ={ level = "warn", priority = -1 }
 dbg_macro = "warn"
 print_stdout = "warn"
 print_stderr = "warn"
@@ -23,13 +23,12 @@ exhaustive_enums = "warn"
 impl_trait_in_params = "warn"
 map_err_ignore = "warn"
 mem_forget = "warn"
-correctness = "deny"
+correctness = { level = "deny", priority = -1 }
 missing_errors_doc = "allow"
 module_name_repetitions = "allow"
 
 [dependencies]
-async-trait = "0.1.79"
-eyre = "0.6.12"
+async-trait = "0.1.80"
 futures = { version = "0.3.30", default-features = false, features = [
     "alloc",
     "std",
@@ -39,12 +38,13 @@ pin-project-lite = "0.2.14"
 redis = { version = "0.25", optional = true, features = ["aio", "tokio-comp"] }
 bb8 = { version = "^0.8", optional = true }
 bb8-redis = { version = "0.15.0", optional = true }
-serde = { version = "1.0.197", features = ["derive"] }
-serde_json = "1.0.115"
-thiserror = "1.0.58"
+serde = { version = "1.0.202", features = ["derive"] }
+serde_json = "1.0.117"
+thiserror = "1.0.61"
 tokio = { version = "1.37.0", features = ["macros"] }
 tower = { version = "0.4.13", features = ["make"] }
 tracing = { version = "0.1.40", features = ["async-await"] }
+anyhow = "1.0.86"
 
 [dev-dependencies]
 rand = "0.8.5"
