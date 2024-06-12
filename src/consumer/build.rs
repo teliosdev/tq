@@ -1,28 +1,32 @@
 use super::{Config, Consumer, ConsumerProvider, Message};
+use crate::ConsumerStream;
 use std::time::Duration;
 
-pub struct ConsumerBuilder<T, P, S> {
+pub struct ConsumerBuilder<T, P, S, E> {
     pub(super) provider: P,
     pub(super) service: S,
     pub(super) config: super::Config,
-    pub(super) _phantom: std::marker::PhantomData<T>,
+    pub(super) _message: std::marker::PhantomData<T>,
+    pub(super) _error: std::marker::PhantomData<fn() -> E>,
 }
 
-impl<T, P, S> ConsumerBuilder<T, P, S> {
-    pub fn with_provider<NP>(self, provider: NP) -> ConsumerBuilder<T, NP, S>
+impl<T, P, S, E> ConsumerBuilder<T, P, S, E> {
+    pub fn with_provider<NP>(self, provider: NP) -> ConsumerBuilder<T, NP, S, E>
     where
         T: serde::de::DeserializeOwned,
         NP: ConsumerProvider<T>,
+        E: From<NP::Error>,
     {
         ConsumerBuilder {
             provider,
             service: self.service,
             config: self.config,
-            _phantom: std::marker::PhantomData,
+            _message: std::marker::PhantomData,
+            _error: std::marker::PhantomData,
         }
     }
 
-    pub fn with_service<NS>(self, service: NS) -> ConsumerBuilder<T, P, NS>
+    pub fn with_service<NS>(self, service: NS) -> ConsumerBuilder<T, P, NS, E>
     where
         NS: tower::MakeService<(), Message<T>, Response = (), Error = ()>,
     {
@@ -30,7 +34,8 @@ impl<T, P, S> ConsumerBuilder<T, P, S> {
             provider: self.provider,
             config: self.config,
             service,
-            _phantom: std::marker::PhantomData,
+            _message: std::marker::PhantomData,
+            _error: std::marker::PhantomData,
         }
     }
 
@@ -57,19 +62,23 @@ impl<
         T: serde::de::DeserializeOwned,
         P: ConsumerProvider<T>,
         S: tower::MakeService<(), Message<T>, Response = (), Error = ()>,
-    > ConsumerBuilder<T, P, S>
+        E,
+    > ConsumerBuilder<T, P, S, E>
+where
+    E: From<<<P as ConsumerProvider<T>>::Stream as ConsumerStream<T>>::Error> + 'static,
 {
-    pub fn build(self) -> Consumer<T, P, S> {
+    pub fn build(self) -> Consumer<T, P, S, E> {
         Consumer {
             provider: self.provider,
             service: self.service,
             config: self.config,
-            _phantom: std::marker::PhantomData,
+            _message: std::marker::PhantomData,
+            _error: std::marker::PhantomData,
         }
     }
 }
 
-impl<T, P: std::fmt::Debug, S: std::fmt::Debug> std::fmt::Debug for ConsumerBuilder<T, P, S> {
+impl<T, P: std::fmt::Debug, S: std::fmt::Debug, E> std::fmt::Debug for ConsumerBuilder<T, P, S, E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConsumerBuilder")
             .field("provider", &self.provider)

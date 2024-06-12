@@ -288,6 +288,12 @@ pub enum RedisStreamError {
         #[source]
         source: redis::RedisError,
     },
+
+    #[error("failed to join consumer task: {source}")]
+    Task {
+        #[from]
+        source: tokio::task::JoinError,
+    },
 }
 
 impl<T: serde::de::DeserializeOwned + Unpin> RedisStream<T> {

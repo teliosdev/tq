@@ -85,7 +85,7 @@ async fn test_standard() {
         }
     });
 
-    let consumer = Consumer::build::<Task, _>(consumer)
+    let consumer = Consumer::build::<Task, anyhow::Error, _>(consumer)
         .with_service(service)
         .with_keep_alive_interval(Duration::from_secs(1))
         .with_poll_timeout(Duration::from_secs(1))
@@ -158,7 +158,7 @@ async fn test_nack() {
         }
     });
 
-    let consumer = Consumer::build::<Task, _>(consumer)
+    let consumer = Consumer::build::<Task, anyhow::Error, _>(consumer)
         .with_service(service)
         .with_keep_alive_interval(Duration::from_secs(1))
         .with_poll_timeout(Duration::from_secs(1))

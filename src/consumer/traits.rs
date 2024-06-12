@@ -1,5 +1,6 @@
 use super::{Message, MessageId};
 use std::pin::Pin;
+use tokio::task::JoinError;
 
 #[async_trait::async_trait]
 pub trait ConsumerProvider<T: serde::de::DeserializeOwned> {
@@ -11,7 +12,7 @@ pub trait ConsumerProvider<T: serde::de::DeserializeOwned> {
 
 #[async_trait::async_trait]
 pub trait ConsumerStream<T: serde::de::DeserializeOwned>: Send + 'static {
-    type Error: std::error::Error;
+    type Error: std::error::Error + From<JoinError>;
 
     /// Retrieves the next item in this consumer stream.
     ///

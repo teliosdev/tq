@@ -10,20 +10,27 @@ use std::future::Future;
 use std::pin::Pin;
 use tokio::sync::watch;
 
-pub struct Consumer<T, P, S> {
+pub struct Consumer<T, P, S, E> {
     provider: P,
     service: S,
     config: Config,
-    _phantom: std::marker::PhantomData<T>,
+    _message: std::marker::PhantomData<T>,
+    _error: std::marker::PhantomData<fn() -> E>,
 }
 
-impl Consumer<(), (), ()> {
-    pub fn build<T, P>(provider: P) -> ConsumerBuilder<T, P, ()> {
+impl Consumer<(), (), (), ()> {
+    pub fn build<T, E, P>(provider: P) -> ConsumerBuilder<T, P, (), E>
+    where
+        T: serde::de::DeserializeOwned,
+        P: ConsumerProvider<T>,
+        E: From<P::Error>,
+    {
         ConsumerBuilder {
             provider,
             service: (),
             config: Config::default(),
-            _phantom: std::marker::PhantomData,
+            _message: std::marker::PhantomData,
+            _error: std::marker::PhantomData,
         }
     }
 }
@@ -32,7 +39,8 @@ impl<
         T: Send + 'static,
         P: ConsumerProvider<T>,
         S: tower::MakeService<(), Message<T>, Response = (), Error = ()>,
-    > Consumer<T, P, S>
+        E,
+    > Consumer<T, P, S, E>
 where
     T: serde::de::DeserializeOwned,
     P::Stream: Send + 'static,
@@ -42,12 +50,13 @@ where
     P::Error: std::error::Error + Send + Sync + 'static,
     S::MakeError: std::error::Error + Send + Sync + 'static,
     <<P as ConsumerProvider<T>>::Stream as ConsumerStream<T>>::Error: Send + Sync + 'static,
+    E: From<<<P as ConsumerProvider<T>>::Stream as ConsumerStream<T>>::Error> + 'static,
 {
     pub async fn run(
         mut self,
         consumer: &str,
         spawn: usize,
-    ) -> Result<Spawn<'static>, anyhow::Error> {
+    ) -> Result<Spawn<'static, E>, anyhow::Error> {
         let (tx, rx) = watch::channel(false);
 
         let mut spawns = Spawn {
@@ -72,7 +81,7 @@ where
     }
 }
 
-impl<T, P: std::fmt::Debug, S: std::fmt::Debug> std::fmt::Debug for Consumer<T, P, S> {
+impl<T, P: std::fmt::Debug, S: std::fmt::Debug, E> std::fmt::Debug for Consumer<T, P, S, E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Consumer")
             .field("provider", &self.provider)
@@ -82,18 +91,20 @@ impl<T, P: std::fmt::Debug, S: std::fmt::Debug> std::fmt::Debug for Consumer<T, 
     }
 }
 
-async fn process_stream<T, C, S>(
+#[tracing::instrument(skip_all, name = "queue.poll")]
+async fn process_stream<T, C, S, E>(
     stream: C,
     mut service: S,
     mut rx: watch::Receiver<bool>,
     config: Config,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>>
+) -> Result<(), E>
 where
     T: serde::de::DeserializeOwned,
     C: ConsumerStream<T>,
     S: tower::Service<Message<T>, Response = (), Error = ()>,
     S::Future: Send + 'static,
     C::Error: std::error::Error + Send + Sync + 'static,
+    E: From<C::Error>,
 {
     let mut stream = std::pin::pin!(stream);
 
@@ -117,18 +128,19 @@ where
     Ok(())
 }
 
-async fn process_message<T, C, S>(
+async fn process_message<T, C, S, E>(
     mut stream: Pin<&mut C>,
     service: &mut S,
     config: &Config,
     message: Message<T>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>>
+) -> Result<(), E>
 where
     C: ConsumerStream<T>,
     T: serde::de::DeserializeOwned,
     S: tower::Service<Message<T>, Response = (), Error = ()>,
     S::Future: Send + 'static,
     C::Error: std::error::Error + Send + Sync + 'static,
+    E: From<C::Error>,
 {
     let id = message.id.clone();
     let mut task = tokio::spawn(service.call(message));
@@ -155,7 +167,7 @@ where
             stream.nack(&id).await?;
             Ok(())
         }
-        Err(e) => Err(e.into()),
+        Err(e) => Err(C::Error::from(e).into()),
     }
 }
 
@@ -176,16 +188,16 @@ impl Default for Config {
     }
 }
 
-type TaskResult = Result<(), Box<dyn std::error::Error + Send + Sync + 'static>>;
+type Task<E> = Pin<Box<dyn Future<Output = Result<(), E>>>>;
 
 #[must_use]
-pub struct Spawn<'shutdown> {
-    tasks: Vec<Pin<Box<dyn Future<Output = TaskResult>>>>,
+pub struct Spawn<'shutdown, E> {
+    tasks: Vec<Task<E>>,
     tx: Option<watch::Sender<bool>>,
     stop: Pin<Box<dyn Future<Output = ()> + 'shutdown>>,
 }
 
-impl<'shutdown> Spawn<'shutdown> {
+impl<'shutdown, E> Spawn<'shutdown, E> {
     pub fn with_graceful_shutdown<F>(self, future: F) -> Self
     where
         F: Future<Output = ()> + 'shutdown,
@@ -206,7 +218,7 @@ impl<'shutdown> Spawn<'shutdown> {
         }
     }
 
-    pub async fn wait(self) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
+    pub async fn wait(self) -> Result<(), E> {
         let tasks = futures::stream::FuturesUnordered::from_iter(self.tasks).try_collect::<()>();
         let stop = self.stop;
         let stop = async move {
@@ -218,7 +230,7 @@ impl<'shutdown> Spawn<'shutdown> {
     }
 }
 
-impl std::fmt::Debug for Spawn<'_> {
+impl<E> std::fmt::Debug for Spawn<'_, E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Spawn").finish_non_exhaustive()
     }
