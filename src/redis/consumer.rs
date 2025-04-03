@@ -608,7 +608,8 @@ impl<T: serde::de::DeserializeOwned + Send + Unpin + 'static> ConsumerStream<T> 
             "task does not belong to this consumer"
         );
 
-        this.connection
+        let _: () = this
+            .connection
             .xack(&*this.stream, &*this.group, &[&id])
             .await
             .map_err(|source| RedisStreamError::Ack {

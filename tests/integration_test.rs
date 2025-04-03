@@ -46,9 +46,9 @@ async fn connect(key: &str) -> (redis::Client, bb8::Pool<RedisConnectionManager>
 }
 
 fn queue_key() -> String {
-    let rng = rand::thread_rng();
+    let rng = rand::rng();
     let v: Vec<u8> = rng
-        .sample_iter(rand::distributions::Alphanumeric)
+        .sample_iter(rand::distr::Alphanumeric)
         .take(16)
         .collect();
     let v = String::from_utf8(v).expect("from_utf8");
